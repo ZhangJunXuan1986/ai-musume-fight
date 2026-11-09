@@ -1,0 +1,99 @@
+name: Deploy to GitHub Pages (pygbag)
+
+# 不限制分支：任何分支 push 都会触发，也能在 Actions 里手动点 Run workflow。
+# 这样即使你的默认分支不叫 main，也不会因为分支名对不上而「什么都没发生」。
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 容错：网页拖拽上传会把目录拍平，文件全散在仓库根目录。
+      # 这里在构建机上临时补出 game/ 与 tools/ 结构，只影响 CI，
+      # 不会改动你仓库里的文件。目录本来就正确时这一段什么都不做。
+      # ---------------------------------------------------------------
+      - name: Normalize layout (tolerate flat upload)
+        run: |
+          python - <<'PY'
+          import os, shutil, sys
+
+          if not os.path.exists("game/main.py"):
+              print("检测到平铺结构，临时组装 game/ 与 tools/ ...")
+              os.makedirs("game/assets", exist_ok=True)
+              os.makedirs("tools", exist_ok=True)
+              pairs = [
+                  ("main.py",        "game/main.py"),
+                  ("font.ttf",       "game/assets/font.ttf"),
+                  ("favicon.png",    "game/favicon.png"),
+                  ("patch_index.py", "tools/patch_index.py"),
+                  ("make_font.py",   "tools/make_font.py"),
+              ]
+              for src, dst in pairs:
+                  if os.path.exists(src) and not os.path.exists(dst):
+                      shutil.copy2(src, dst)
+                      print("  %s -> %s" % (src, dst))
+          else:
+              print("目录结构已正确，跳过。")
+
+          if not os.path.exists("game/main.py"):
+              sys.exit("ERROR: 仓库里找不到 main.py，无法构建。请上传 main.py。")
+          if not os.path.exists("game/assets/font.ttf"):
+              print("WARN: 缺 game/assets/font.ttf，网页里中文可能显示为方块（不影响构建）。")
+          PY
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pygbag
+        run: python -m pip install --upgrade pip pygbag pygame-ce
+
+      - name: Build WASM (build only, no server)
+        run: python -m pygbag --build --width 1280 --height 720 game
+
+      - name: Show build output
+        run: ls -laR game/build/web | head -60
+
+      - name: Patch index.html for mobile landscape
+        run: |
+          if [ -f tools/patch_index.py ]; then
+            python tools/patch_index.py game/build/web/index.html
+          else
+            echo "WARN: 缺 tools/patch_index.py，跳过横屏提示注入（游戏仍可玩）"
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: game/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
