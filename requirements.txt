@@ -1,0 +1,4 @@
+# 本地开发 / 预览用；GitHub Actions 会自己装
+pygame-ce>=2.4
+pygbag>=0.9
+fonttools>=4.50
