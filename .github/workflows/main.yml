@@ -1,7 +1,6 @@
 name: Deploy to GitHub Pages (pygbag)
 
-# 不限制分支：任何分支 push 都会触发，也能在 Actions 里手动点 Run workflow。
-# 这样即使你的默认分支不叫 main，也不会因为分支名对不上而「什么都没发生」。
+# 任何分支 push / 手动 Run workflow 都触发（不挑分支名）
 on:
   push:
     branches: ['**']
@@ -24,38 +23,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------
-      # 容错：网页拖拽上传会把目录拍平，文件全散在仓库根目录。
-      # 这里在构建机上临时补出 game/ 与 tools/ 结构，只影响 CI，
-      # 不会改动你仓库里的文件。目录本来就正确时这一段什么都不做。
-      # ---------------------------------------------------------------
+      # 容错：网页拖拽上传会把目录拍平，这里在构建机上临时补出结构
       - name: Normalize layout (tolerate flat upload)
         run: |
           python - <<'PY'
           import os, shutil, sys
-
           if not os.path.exists("game/main.py"):
               print("检测到平铺结构，临时组装 game/ 与 tools/ ...")
               os.makedirs("game/assets", exist_ok=True)
               os.makedirs("tools", exist_ok=True)
-              pairs = [
-                  ("main.py",        "game/main.py"),
-                  ("font.ttf",       "game/assets/font.ttf"),
-                  ("favicon.png",    "game/favicon.png"),
+              for src, dst in [
+                  ("main.py", "game/main.py"),
+                  ("font.ttf", "game/assets/font.ttf"),
+                  ("favicon.png", "game/favicon.png"),
                   ("patch_index.py", "tools/patch_index.py"),
-                  ("make_font.py",   "tools/make_font.py"),
-              ]
-              for src, dst in pairs:
+                  ("make_font.py", "tools/make_font.py"),
+              ]:
                   if os.path.exists(src) and not os.path.exists(dst):
                       shutil.copy2(src, dst)
                       print("  %s -> %s" % (src, dst))
-          else:
-              print("目录结构已正确，跳过。")
-
           if not os.path.exists("game/main.py"):
-              sys.exit("ERROR: 仓库里找不到 main.py，无法构建。请上传 main.py。")
-          if not os.path.exists("game/assets/font.ttf"):
-              print("WARN: 缺 game/assets/font.ttf，网页里中文可能显示为方块（不影响构建）。")
+              sys.exit("ERROR: 仓库里找不到 main.py，无法构建。")
           PY
 
       - name: Setup Python
@@ -69,16 +57,99 @@ jobs:
       - name: Build WASM (build only, no server)
         run: python -m pygbag --build --width 1280 --height 720 game
 
-      - name: Show build output
-        run: ls -laR game/build/web | head -60
-
-      - name: Patch index.html for mobile landscape
+      # ★ 关键修复：CSS 直接内联在构建步骤里，必然执行，
+      #   不再依赖 tools/patch_index.py 有没有传上去、是不是旧版。
+      - name: Force canvas 16:9 centered (inline CSS)
         run: |
-          if [ -f tools/patch_index.py ]; then
-            python tools/patch_index.py game/build/web/index.html
-          else
-            echo "WARN: 缺 tools/patch_index.py，跳过横屏提示注入（游戏仍可玩）"
-          fi
+          python - <<'PY'
+          import io, os, re, sys
+          p = "game/build/web/index.html"
+          if not os.path.exists(p):
+              sys.exit("ERROR: 找不到 " + p)
+          src = io.open(p, encoding="utf-8", errors="replace").read()
+
+          CSS_ID, JS_ID, TIP_ID = "aimf-fit-css-v4", "aimf-fit-js-v4", "aimf-rotate-v4"
+          css = """<style id="%s">
+          html,body{margin:0!important;padding:0!important;width:100%%!important;height:100%%!important;
+            overflow:hidden!important;overscroll-behavior:none!important;
+            background:#0b0d1a!important;zoom:1!important;transform:none!important;}
+          canvas{display:block!important;outline:none!important;
+            position:fixed!important;margin:0!important;transform:none!important;zoom:1!important;
+            max-width:none!important;max-height:none!important;object-fit:fill!important;
+            touch-action:none!important;}
+          #%s{display:none;position:fixed;left:50%%;top:calc(8px + env(safe-area-inset-top,0px));
+            transform:translateX(-50%%);z-index:9999;pointer-events:none;
+            background:rgba(11,13,28,.86);color:#ffd060;border:1px solid rgba(255,208,96,.45);
+            border-radius:22px;padding:8px 18px;max-width:92vw;white-space:nowrap;text-align:center;
+            font:600 14px/1.5 system-ui,-apple-system,sans-serif;}
+          @media (orientation:portrait){#%s{display:block}}
+          </style>
+          """ % (CSS_ID, TIP_ID, TIP_ID)
+
+          body = """<div id="%s">请把手机横过来玩（竖屏也能继续加载）</div>
+          <script id="%s">
+          (function(){
+            var tries=0;
+            function fit(){
+              var cs=document.querySelectorAll('canvas');
+              if(!cs.length) return;
+              var vw=window.innerWidth||document.documentElement.clientWidth;
+              var vh=(window.visualViewport&&window.visualViewport.height)||window.innerHeight;
+              if(!vw||!vh) return;
+              var w=0,h=0,L=0,T=0;
+              for(var i=0;i<cs.length;i++){
+                var c=cs[i];
+                if(c.style.display==='none'||c.width<2||c.height<2) continue;
+                var s=Math.min(vw/c.width,vh/c.height);
+                w=Math.round(c.width*s);h=Math.round(c.height*s);
+                L=Math.round((vw-w)/2);T=Math.round((vh-h)/2);
+                c.style.setProperty('position','fixed','important');
+                c.style.setProperty('left',L+'px','important');
+                c.style.setProperty('top',T+'px','important');
+                c.style.setProperty('margin','0','important');
+                c.style.setProperty('width',w+'px','important');
+                c.style.setProperty('height',h+'px','important');
+                c.style.setProperty('max-width','none','important');
+                c.style.setProperty('max-height','none','important');
+                c.style.setProperty('transform','none','important');
+                c.style.setProperty('zoom','1','important');
+                c.style.setProperty('object-fit','fill','important');
+                c.style.setProperty('touch-action','none','important');
+                c.setAttribute('tabindex','0');
+              }
+              if(window.__aimfLast!==vw+'x'+vh){
+                window.__aimfLast=vw+'x'+vh;
+                console.log('[aimusume-fit] injected: canvas '+cs[0].width+'x'+cs[0].height+' -> '+w+'x'+h+' @ '+L+','+T);
+              }
+            }
+            fit();
+            ['resize','orientationchange','pageshow','focus','load'].forEach(function(e){window.addEventListener(e,fit);});
+            if(window.visualViewport) window.visualViewport.addEventListener('resize',fit);
+            document.addEventListener('visibilitychange',function(){if(!document.hidden){fit();try{document.querySelector('canvas').focus();}catch(e){}}});
+            var timer=setInterval(function(){
+              fit();var c=document.querySelector('canvas');
+              if(c&&c.width>0&&++tries>60) clearInterval(timer);
+            },250);
+            document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:false});
+            document.addEventListener('gesturestart',function(e){e.preventDefault();});
+            document.addEventListener('pointerdown',function(){try{document.querySelector('canvas').focus();}catch(e){}},{passive:true});
+          })();
+          </script>
+          """ % (TIP_ID, JS_ID)
+
+          # 每次都先删干净历次旧注入块，再重写最新版（不再「看到标记就跳过」）
+          src = re.sub(r'<style id="AIMF_WEB_PATCH_V[0-9]+">.*?</style>\s*', '', src, flags=re.S)
+          src = re.sub(r'<style id="'+CSS_ID+r'">.*?</style>\s*', '', src, flags=re.S)
+          src = re.sub(r'<div id="aimf-rotate[^"]*">.*?</div>\s*', '', src, flags=re.S)
+          src = re.sub(r'<div id="'+TIP_ID+r'">.*?</div>\s*', '', src, flags=re.S)
+          src = re.sub(r'<script id="'+JS_ID+r'">.*?</script>\s*', '', src, flags=re.S)
+          src = re.sub(r'<script>\s*\(function\(\)\{\s*var lastW=0,lastH=0,tries=0;.*?</script>\s*', '', src, flags=re.S)
+          src = re.sub(r'<script>\s*\(function\(\)\{\s*var tries=0;.*?</script>\s*', '', src, flags=re.S)
+          src = src.replace('</head>', css+'</head>', 1) if '</head>' in src else css+src
+          src = src.replace('</body>', body+'</body>', 1) if '</body>' in src else src+body
+          io.open(p,'w',encoding='utf-8').write(src)
+          print("[aimusume-fit] injected: 16:9 centered, force-rewrite (inline)")
+          PY
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
