@@ -10,6 +10,16 @@
     B. 浏览器 / GitHub Pages：pygbag 把本文件连同 assets/ 编译成 WebAssembly，
        访客打开网址就能玩，不用装 Python。本仓库的 Actions 自动完成构建与发布。
 
+【2026-11-09 实测修复（浏览器里跑起来后发现的三个问题）】
+    1) 暂停只闪一帧：原来只写了 banner 且计时设 0，下一帧立即被清掉。
+       现在有真正的 self.paused 状态：冻结计时 / 双方 / 实体，画面盖暂停遮罩，
+       再点一次「暂停 / 继续」恢复。
+    2) 数字 / 字母 / 箭头全是方框：打包字体误用了纯 CJK 后备字体
+       （DroidSansFallback，ASCII 覆盖 0/62）。现改用文泉驿微米黑重新子集化，
+       并加「网页文字保险层」把 ASCII 转全角、几何箭头换汉字，双保险。
+    3) 移动太慢：MOVE_SPEED 4.6 -> 8.2、DASH_SPEED 13 -> 18，
+       并按真实帧间隔补偿位移（浏览器掉到 30fps 也不会再慢一半）。
+
 【为网页做了哪些改动（其余逻辑一行没动）】
     1) import asyncio；主循环改成 async def run()，每帧 await asyncio.sleep(0)
        —— pygbag 要求把控制权还给浏览器事件循环，否则标签页会卡死。
@@ -19,16 +29,22 @@
        - 战绩从「写 JSON 文件」改成「浏览器 localStorage」
     3) resource_path() 增加多个候选路径，兼容 pygbag 的虚拟文件系统。
     4) 入口改成模块级 asyncio.run(App().run())；--selftest / --touchtest 仍是同步分支。
-    5) assets/font.ttf 是子集化中文字体（只保留源码用到的字，约百 KB），
-       浏览器没有系统字体注册表，必须自带字体文件，否则中文全是方块。
+    5) assets/font.ttf 是子集化字体（只保留源码用到的字，约 190 KB）。
+       浏览器没有系统字体注册表，必须自带字体文件，否则中文全是方块；
+       字体还必须覆盖 UI 用的 ▲▼◀▶ 等符号，不然按钮会变方块。
+    6) 美术接口：assets/<角色id>.png 存在就自动替换代码绘制的 Q 版，
+       不存在就照常跑。tools/prepare_assets.py 负责把任意图片处理成规格。
 
 【目录约定（pygbag 强制要求入口叫 main.py 且在应用目录根）】
     game/main.py           <- 就是本文件
-    game/assets/font.ttf   <- 子集化中文字体
+    game/assets/font.ttf   <- 子集化字体
+    game/assets/<id>.png   <- 8 张立绘（占位图，可被正式图覆盖）
     game/favicon.png
     tools/patch_index.py   <- 给生成的 index.html 注入横屏/缩放 CSS
     tools/make_font.py     <- 改了中文文案后重新生成字体
+    tools/prepare_assets.py<- 占位图 / 相册照片处理 / 规格校验
     .github/workflows/deploy.yml
+    美术素材方案.md         <- 素材怎么搞、Termux 命令、出图提示词
 
 【本地怎么跑】
     pip install pygame-ce pygbag
@@ -53,7 +69,7 @@
     3. 主页面点「开始对战」（手指触摸 = 鼠标点击，已做坐标反变换）
     4. 左下角 = P1 十二个动作键，右下角 = P2 十二个动作键，直接点 / 按住
     5. 只想一个人玩：点屏幕中间「AI：关」切成「AI：开」，P2 交给电脑
-    6. 右上角小键：⏎确认 / Esc返回 / ▲▼◀▶ 改设置 / R再战 / C清战绩
+    6. 右上角小键：确=确认 / Esc=返回 / ▲▼◀▶ 改设置 / R=再战 / C=清战绩
     7. 想退回主页面：右上角 Esc，或战斗中中间区「返回」
 
 【电脑上怎么跑 / 自检】
@@ -129,7 +145,7 @@ MOBILE_STRETCH = False         # False=等比缩放居中留黑边（不裁切�
 MOBILE_SMOOTH = False          # True=平滑缩放更好看但更耗性能；False=快速缩放
 MOBILE_FORCE_LANDSCAPE = True  # 检测到竖屏时按横屏尺寸计算（仍建议手机开自动旋转）
 TOUCH_ALPHA = 165              # 虚拟按键底色不透明度 0~255（越小越不挡画面）
-TOUCH_HINT = "左下 P1  ·  右下 P2  ·  中间 AI / 暂停 / 返回 / 再战"
+TOUCH_HINT = "左下 甲  ·  右下 乙  ·  中间 电脑开关 / 暂停 / 返回 / 再战"
 AI_DEFAULT_ON = False          # 手机单人玩：改成 True 则开局自动托管 P2
 AI_THINK_FRAMES = 11           # AI 每隔多少帧决策一次（越小越凶）
 
@@ -150,8 +166,11 @@ TOUCH_MID_W, TOUCH_MID_H = 160, 46
 GROUND_Y = 516                 # 地面线：手机版下移一点，给底部虚拟按键留出空间
 GRAVITY = 0.78                 # 重力加速度（像素/帧²）
 JUMP_V = -16.0                 # 起跳初速度（负数=向上）
-MOVE_SPEED = 4.6               # 左右移动速度（像素/帧）
-DASH_SPEED = 13.0              # 冲刺瞬时速度（像素/帧）
+MOVE_SPEED = 8.2               # 左右移动速度（像素/帧）。原 4.6 在浏览器里偏慢，提到 8.2
+DASH_SPEED = 18.0              # 冲刺瞬时速度（像素/帧）。原 13.0
+FRAME_COMPENSATE = True        # 位移按实际帧间隔补偿：浏览器掉帧时不会整体变慢
+FRAME_SCALE_MIN = 0.6          # 补偿下限（防止切后台回来瞬移）
+FRAME_SCALE_MAX = 2.0          # 补偿上限
 DASH_FRAMES = 10               # 冲刺持续帧数
 DASH_CD = 45                   # 冲刺冷却帧数
 ARENA_LEFT = 40                # 场地左边界
@@ -397,6 +416,36 @@ def lerp(a, b, t):
 
 _FONT_CACHE = {}
 
+# ------------------------------------------------------------------------------
+# 网页文字保险层
+# 浏览器 WASM 里 pygame 可能回退到「仅含 CJK 的后备字体」，那时 ASCII 字母 / 数字
+# 会全部渲染成方框（中文反而正常）。解决办法：网页模式下把 ASCII 统一转成【全角】
+# ——任何中文字体都必带全角 ASCII，中文标点也更稳。桌面版不转换，画面保持原样。
+# 几何箭头这类 CJK 字体常缺的符号，直接换成汉字。
+# ------------------------------------------------------------------------------
+_GEOM_MAP = {
+    "◀": "左", "▶": "右", "▲": "上", "▼": "下",
+    "⏎": "确", "←": "左", "→": "右", "↑": "上", "↓": "下",
+    "✓": "对", "✗": "错", "★": "星", "☆": "星", "●": "点",
+}
+
+
+def web_safe_text(text):
+    """把字符串转成浏览器里一定能显示的形态（只在 IS_WEB 下生效）。"""
+    if not IS_WEB:
+        return str(text)
+    out = []
+    for ch in str(text):
+        if ch in _GEOM_MAP:
+            out.append(_GEOM_MAP[ch])
+        elif ch == " ":
+            out.append(" ")
+        elif 0x21 <= ord(ch) <= 0x7E:
+            out.append(chr(ord(ch) + 0xFEE0))   # ASCII -> 全角
+        else:
+            out.append(ch)
+    return "".join(out)
+
 
 def get_font(size, bold=False):
     """按大小缓存字体；优先 assets/font.ttf，其次系统中文字体。
@@ -406,12 +455,30 @@ def get_font(size, bold=False):
         return _FONT_CACHE[key]
     custom = resource_path(os.path.join(ASSET_DIR, FONT_FILE))
     f = None
-    if os.path.exists(custom):
+    # pygbag 把应用目录挂到 VFS，路径可能是 game/assets/ 或直接在 cwd 下，
+    # 逐个试，并在加载后验证「拉丁 + 中文」都能渲染（避免拿到只有 CJK 的字体）。
+    tries = [
+        custom,
+        os.path.join(ASSET_DIR, FONT_FILE),
+        os.path.join("game", ASSET_DIR, FONT_FILE),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ASSET_DIR, FONT_FILE),
+    ]
+    seen = set()
+    for p in tries:
+        if not p or p in seen:
+            continue
+        seen.add(p)
         try:
-            f = pygame.font.Font(custom, size)
-            f.set_bold(bold)
+            if not os.path.exists(p):
+                continue
+            cand = pygame.font.Font(p, size)
+            cand.set_bold(bold)
+            # .notdef 通常渲染成等宽空框；用 "A" 与 "中" 都有宽度做粗检
+            if cand.size("A")[0] > 0 and cand.size("中")[0] > 0:
+                f = cand
+                break
         except Exception:
-            f = None
+            continue
     if f is None:
         for name in FONT_CANDIDATES:
             p = pygame.font.match_font(name)
@@ -450,8 +517,9 @@ def load_portrait(char_id):
 def draw_text(surf, text, x, y, size=24, color=COL_TEXT, bold=False,
               align="left", shadow=True):
     """带描边阴影的文字绘制；align 支持 left / center / right。"""
+    text = web_safe_text(text)
     f = get_font(size, bold)
-    img = f.render(str(text), True, color)
+    img = f.render(text, True, color)
     r = img.get_rect()
     if align == "center":
         r.centerx, r.top = x, y
@@ -460,7 +528,7 @@ def draw_text(surf, text, x, y, size=24, color=COL_TEXT, bold=False,
     else:
         r.topleft = (x, y)
     if shadow:
-        s = f.render(str(text), True, (0, 0, 0))
+        s = f.render(text, True, (0, 0, 0))
         surf.blit(s, (r.x + 2, r.y + 2))
     surf.blit(img, r)
     return r
@@ -524,9 +592,9 @@ def build_side_buttons(keys, xs, ys):
     """生成一侧（P1 或 P2）的 12 个战斗按键：3 行 × 4 列。
     keys 传 KEYS_P1 / KEYS_P2，生成的两套键码互不冲突。"""
     spec = [
-        ("◀",     ("left",),  ()),                 # 左移（持续按住）
+        ("左",     ("left",),  ()),                 # 左移（持续按住）
         ("防",     ("guard",), ()),                # 防御（持续按住）
-        ("▶",     ("right",), ()),                # 右移（持续按住）
+        ("右",     ("right",), ()),                # 右移（持续按住）
         ("跳",     (), ("jump",)),                 # 跳跃（点一下）
         ("攻",     (), ("atk",)),                  # 普攻
         ("上挑",   ("up",), ("atk",)),             # W+J 浮空，做成独立按钮
@@ -534,7 +602,7 @@ def build_side_buttons(keys, xs, ys):
         ("冲",     (), ("dash",)),                 # 冲刺
         ("远",     (), ("far",)),                  # 远攻投射物
         ("必杀",   (), ("ult",)),                  # 1 格气
-        ("援/反",  (), ("assist",)),               # 援助 / 受击瞬间反制
+        ("援反",   (), ("assist",)),               # 援助 / 受击瞬间反制
         ("变身",   (), ("atk", "jump")),           # J+K，3 格气
     ]
     out = []
@@ -552,13 +620,13 @@ def build_global_buttons():
     gw, gh, gap = TOUCH_GLOBAL_W, TOUCH_GLOBAL_H, TOUCH_GLOBAL_GAP
     spec = [
         ("确",  (GLOBAL_KEYS["confirm"],)),
-        ("Esc", (GLOBAL_KEYS["cancel"],)),
-        ("▲",   (pygame.K_UP,)),
-        ("▼",   (pygame.K_DOWN,)),
-        ("◀",   (pygame.K_LEFT,)),
-        ("▶",   (pygame.K_RIGHT,)),
-        ("R",   (GLOBAL_KEYS["restart"],)),
-        ("C",   (GLOBAL_KEYS["clear_stats"],)),
+        ("退",  (GLOBAL_KEYS["cancel"],)),
+        ("上",  (pygame.K_UP,)),
+        ("下",  (pygame.K_DOWN,)),
+        ("左",  (pygame.K_LEFT,)),
+        ("右",  (pygame.K_RIGHT,)),
+        ("再",  (GLOBAL_KEYS["restart"],)),
+        ("清",  (GLOBAL_KEYS["clear_stats"],)),
     ]
     return [_btn(gx + i * (gw + gap), gy, gw, gh, lab, (), tap)
             for i, (lab, tap) in enumerate(spec)]
@@ -569,10 +637,10 @@ def build_mid_buttons():
     不放在右上角，是因为那里要留给 P2 的血条和气条。"""
     w, h = TOUCH_MID_W, TOUCH_MID_H
     return [
-        _btn(TOUCH_MID_X1, TOUCH_MID_Y1, w, h, "AI：关", (), ()),
-        _btn(TOUCH_MID_X2, TOUCH_MID_Y1, w, h, "暂停 P", (), (GLOBAL_KEYS["pause"],)),
-        _btn(TOUCH_MID_X1, TOUCH_MID_Y2, w, h, "返回",   (), (GLOBAL_KEYS["cancel"],)),
-        _btn(TOUCH_MID_X2, TOUCH_MID_Y2, w, h, "再战 R", (), (GLOBAL_KEYS["restart"],)),
+        _btn(TOUCH_MID_X1, TOUCH_MID_Y1, w, h, "电脑：关", (), ()),
+        _btn(TOUCH_MID_X2, TOUCH_MID_Y1, w, h, "暂停／继续", (), (GLOBAL_KEYS["pause"],)),
+        _btn(TOUCH_MID_X1, TOUCH_MID_Y2, w, h, "返回",     (), (GLOBAL_KEYS["cancel"],)),
+        _btn(TOUCH_MID_X2, TOUCH_MID_Y2, w, h, "再战",     (), (GLOBAL_KEYS["restart"],)),
     ]
 
 
@@ -884,11 +952,12 @@ class Fighter:
     def _do_movement(self, keys, k, can_guard, game):
         """左右移动 + 走路相位 + 地面状态切换。"""
         moving = False
+        step = self.speed * game.frame_scale
         if keys[k["left"]]:
-            self.x -= self.speed
+            self.x -= step
             moving = True
         if keys[k["right"]]:
-            self.x += self.speed
+            self.x += step
             moving = True
         self.walk_phase += 0.22 if moving else 0.06
         if self.y >= GROUND_Y - 1:
@@ -1537,8 +1606,10 @@ class App:
         self.over = False
         self.winner = 0
         self.over_t = 0
-        self.banner = ""                    # 开局 「READY / FIGHT」提示
+        self.banner = ""                    # 开局 「准备 / 开打」提示
         self.banner_t = 0
+        self.paused = False                # 网页 / 触屏下真正的对局暂停开关
+        self.frame_scale = 1.0             # 本帧位移补偿系数（按真实 dt 计算）
 
     def __init__(self, selftest=False):
         """只做编排：核心状态 → 显示 → 触屏 → 设置 → 对局对象。"""
@@ -1595,13 +1666,13 @@ class App:
         self.clicks.append((pos, 1))
         if b is None:
             return
-        # 中间的「AI：关/开」按钮单独处理，不映射成键盘
-        if b[1].startswith("AI："):
+        # 中间的「电脑：关/开」按钮单独处理，不映射成键盘
+        if b[1].startswith("电脑："):
             self.ai_on = not self.ai_on
             for i, m in enumerate(self.mid_btns):
-                if m[1].startswith("AI："):
+                if m[1].startswith("电脑："):
                     self.mid_btns[i] = _btn(m[0].x, m[0].y, m[0].w, m[0].h,
-                                            "AI：开" if self.ai_on else "AI：关")
+                                            "电脑：开" if self.ai_on else "电脑：关")
             return
         self.touch_hits[tid] = b
         for c in b[3]:
@@ -1741,6 +1812,7 @@ class App:
     # ---- 开局 / 结算 ----
     def start_match(self):
         """按当前设置与角色选择创建一局对战。"""
+        self.paused = False
         hp_scale = HP_SCALE_OPTIONS[self.hp_idx]
         self.p1 = Fighter(1, CHARACTERS[self.sel[1]], SCREEN_W * 0.28)
         self.p2 = Fighter(2, CHARACTERS[self.sel[2]], SCREEN_W * 0.72)
@@ -1752,7 +1824,7 @@ class App:
         self.shake = 0
         self.time_left = float(TIME_OPTIONS[self.time_idx])
         self.over, self.winner, self.over_t = False, 0, 0
-        self.banner, self.banner_t = "READY?", 70
+        self.banner, self.banner_t = "准备", 70
         self.scene = "game"
 
     def finish(self, winner=0):
@@ -1830,6 +1902,12 @@ class App:
 
     def update(self, dt, keys, just):
         """按当前页面分发更新。"""
+        # 浏览器可能只跑 30fps，而位移原本是「每帧固定像素」，会整体变慢。
+        # 这里按真实帧间隔算出补偿系数，交给 Fighter 使用。
+        if FRAME_COMPENSATE:
+            self.frame_scale = clamp(dt * FPS, FRAME_SCALE_MIN, FRAME_SCALE_MAX)
+        else:
+            self.frame_scale = 1.0
         self.clear_confirm = max(0, self.clear_confirm - 1)
         if self.scene == "menu":
             self.upd_menu(keys, just)
@@ -1970,10 +2048,10 @@ class App:
 
     # ---- 游戏页 ----
     def _advance_banner(self):
-        """开局 READY? → FIGHT! → 消失 的提示计时。"""
+        """开局 准备 → 开打 → 消失 的提示计时。"""
         self.banner_t = max(0, self.banner_t - 1)
-        if self.banner_t == 0 and self.banner == "READY?":
-            self.banner, self.banner_t = "FIGHT!", 45
+        if self.banner_t == 0 and self.banner == "准备":
+            self.banner, self.banner_t = "开打", 45
         elif self.banner_t == 0:
             self.banner = ""
 
@@ -2024,11 +2102,19 @@ class App:
         self.slashes[:] = [s for s in self.slashes if s["t"] > 0]
 
     def upd_game(self, dt, keys, just):
-        """游戏页每帧编排：提示 → 结算/计时/回血 → 双方更新 → 实体 → 判定。"""
+        """游戏页每帧编排：暂停开关 → 结算/计时/回血 → 双方更新 → 实体 → 判定。"""
         k = GLOBAL_KEYS
         self.over_t += 1 if self.over else 0
-        self._advance_banner()
         self.shake = max(0, self.shake - 1)
+
+        # 暂停开关：同一个键 / 同一个「暂停 / 继续」按钮，再按一次恢复。
+        # 之前只写了个 banner 且计时设 0，下一帧就被清掉，等于没暂停 —— 这里修好。
+        if k["pause"] in just:
+            self.paused = not self.paused
+        if self.paused and not self.over:
+            return   # 计时、角色、实体全部冻结；画面由 draw() 画暂停遮罩
+
+        self._advance_banner()
 
         if self.over:
             if k["restart"] in just:
@@ -2041,8 +2127,6 @@ class App:
         self._tick_round_timer(dt)
         if self.training:
             self._training_regen()
-        if GLOBAL_KEYS["pause"] in just:
-            self.banner, self.banner_t = "PAUSED (P 继续)", 0
 
         self.p1.update(self, keys, just)
         self.p2.update(self, keys, just)
@@ -2060,6 +2144,16 @@ class App:
             draw_background(buf, self.t)
             self.draw_game(buf)
             s.blit(buf, (ox, oy))
+            if self.paused and not self.over:
+                mask = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+                mask.fill((6, 8, 24, 165))
+                s.blit(mask, (0, 0))
+                draw_text(s, "已暂停", SCREEN_W // 2, 236, 80,
+                          COL_GOLD, True, "center")
+                draw_text(s, "再点一次「暂停 / 继续」开打", SCREEN_W // 2, 344, 28,
+                          COL_TEXT, align="center")
+                draw_text(s, "也可以点中间「再战」重开一局", SCREEN_W // 2, 390, 22,
+                          COL_DIM, align="center")
         elif self.scene == "menu":
             self.draw_menu(s)
         elif self.scene == "select":
@@ -2387,11 +2481,11 @@ def touchtest_setup():
     app.scene = "game"                    # 战斗按键只在 game 场景激活
     p = app.to_canvas(240 + 24 * 1.5, 566 * 1.5 + 20)
     b = app.hit_button(p)
-    assert b is not None and b[1] == "◀", ("坐标反变换失败", p, b)
+    assert b is not None and b[1] == "左", ("坐标反变换失败", p, b)
     app.just = set()
     app.on_touch_down(1, (240 + 24 * 1.5, 566 * 1.5 + 20))   # P1 左移 hold
     app.on_touch_down(2, (240 + 900 * 1.5, 566 * 1.5 + 20))  # P2 左移 hold
-    assert app.touch_hits[1][1] == "◀" and app.touch_hits[2][1] == "◀"
+    assert app.touch_hits[1][1] == "左" and app.touch_hits[2][1] == "左"
     return app
 
 

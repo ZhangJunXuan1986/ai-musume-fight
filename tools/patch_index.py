@@ -11,14 +11,15 @@ import io
 import os
 import sys
 
-MARK = "AIMF_WEB_PATCH_V1"
+MARK = "AIMF_WEB_PATCH_V2"
 
-CSS = """<style id="AIMF_WEB_PATCH_V1">
+CSS = """<style id="AIMF_WEB_PATCH_V2">
 /* 画布：保持 1280x720 内在比例，等比缩小到屏幕内，禁用浏览器手势 */
 canvas{
   position:fixed !important; left:50% !important; top:50% !important;
   transform:translate(-50%,-50%) !important;
   max-width:100vw !important; max-height:100vh !important;
+  max-height:100dvh !important;  /* 手机浏览器地址栏收起时用动态视口高度 */
   width:auto !important; height:auto !important;
   touch-action:none !important; outline:none;
 }
