@@ -57,9 +57,11 @@ jobs:
       - name: Build WASM (build only, no server)
         run: python -m pygbag --build --width 1280 --height 720 game
 
-      # ★ 关键修复：CSS 直接内联在构建步骤里，必然执行，
-      #   不再依赖 tools/patch_index.py 有没有传上去、是不是旧版。
-      - name: Force canvas 16:9 centered (inline CSS)
+      # ★ v3.1 关键修复：canvas 的【布局宽高】恒等于内部像素 1280×720，
+      #   只用 transform:scale() 做视觉缩放。这样无论 pygbag 读 offsetX 还是
+      #   getBoundingClientRect 换算，鼠标/触摸坐标都落在 0..1280，右下角按钮点得到。
+      #   （v4 直接把 style.width 改小 → offsetX 最大只有缩放后的宽度 → 点不到。）
+      - name: Center canvas (transform scale, preserve input coords)
         run: |
           python - <<'PY'
           import io, os, re, sys
@@ -68,26 +70,26 @@ jobs:
               sys.exit("ERROR: 找不到 " + p)
           src = io.open(p, encoding="utf-8", errors="replace").read()
 
-          CSS_ID, JS_ID, TIP_ID = "aimf-fit-css-v4", "aimf-fit-js-v4", "aimf-rotate-v4"
-          css = """<style id="%s">
-          html,body{margin:0!important;padding:0!important;width:100%%!important;height:100%%!important;
+          CSS_ID, JS_ID, TIP_ID = "aimf-fit-css-v5", "aimf-fit-js-v5", "aimf-rotate-v5"
+          css = """<style id="AIMF_CSS">
+          html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;
             overflow:hidden!important;overscroll-behavior:none!important;
             background:#0b0d1a!important;zoom:1!important;transform:none!important;}
           canvas{display:block!important;outline:none!important;
-            position:fixed!important;margin:0!important;transform:none!important;zoom:1!important;
-            max-width:none!important;max-height:none!important;object-fit:fill!important;
+            position:fixed!important;margin:0!important;zoom:1!important;
+            transform-origin:0 0!important;
             touch-action:none!important;}
-          #%s{display:none;position:fixed;left:50%%;top:calc(8px + env(safe-area-inset-top,0px));
-            transform:translateX(-50%%);z-index:9999;pointer-events:none;
+          #AIMF_TIP{display:none;position:fixed;left:50%;top:calc(8px + env(safe-area-inset-top,0px));
+            transform:translateX(-50%);z-index:9999;pointer-events:none;
             background:rgba(11,13,28,.86);color:#ffd060;border:1px solid rgba(255,208,96,.45);
             border-radius:22px;padding:8px 18px;max-width:92vw;white-space:nowrap;text-align:center;
             font:600 14px/1.5 system-ui,-apple-system,sans-serif;}
-          @media (orientation:portrait){#%s{display:block}}
+          @media (orientation:portrait){#AIMF_TIP{display:block}}
           </style>
-          """ % (CSS_ID, TIP_ID, TIP_ID)
+          """.replace("AIMF_CSS", CSS_ID).replace("AIMF_TIP", TIP_ID)
 
-          body = """<div id="%s">请把手机横过来玩（竖屏也能继续加载）</div>
-          <script id="%s">
+          body = """<div id="AIMF_TIP2">请把手机横过来玩（竖屏也能继续加载）</div>
+          <script id="AIMF_JS">
           (function(){
             var tries=0;
             function fit(){
@@ -103,23 +105,25 @@ jobs:
                 var s=Math.min(vw/c.width,vh/c.height);
                 w=Math.round(c.width*s);h=Math.round(c.height*s);
                 L=Math.round((vw-w)/2);T=Math.round((vh-h)/2);
+                /* 布局尺寸 === 内部像素尺寸，视觉缩放只交给 transform */
                 c.style.setProperty('position','fixed','important');
                 c.style.setProperty('left',L+'px','important');
                 c.style.setProperty('top',T+'px','important');
                 c.style.setProperty('margin','0','important');
-                c.style.setProperty('width',w+'px','important');
-                c.style.setProperty('height',h+'px','important');
+                c.style.setProperty('width',c.width+'px','important');
+                c.style.setProperty('height',c.height+'px','important');
                 c.style.setProperty('max-width','none','important');
                 c.style.setProperty('max-height','none','important');
-                c.style.setProperty('transform','none','important');
                 c.style.setProperty('zoom','1','important');
-                c.style.setProperty('object-fit','fill','important');
+                c.style.setProperty('transform-origin','0 0','important');
+                c.style.setProperty('transform','scale('+s+')','important');
                 c.style.setProperty('touch-action','none','important');
                 c.setAttribute('tabindex','0');
               }
+              window.__aimfInputScale=1;
               if(window.__aimfLast!==vw+'x'+vh){
                 window.__aimfLast=vw+'x'+vh;
-                console.log('[aimusume-fit] injected: canvas '+cs[0].width+'x'+cs[0].height+' -> '+w+'x'+h+' @ '+L+','+T);
+                console.log('[aimusume-fit] transform-scale '+cs[0].width+'x'+cs[0].height+' -> '+w+'x'+h+' @ '+L+','+T+'  (input coords preserved)');
               }
             }
             fit();
@@ -135,20 +139,19 @@ jobs:
             document.addEventListener('pointerdown',function(){try{document.querySelector('canvas').focus();}catch(e){}},{passive:true});
           })();
           </script>
-          """ % (TIP_ID, JS_ID)
+          """.replace("AIMF_TIP2", TIP_ID).replace("AIMF_JS", JS_ID)
 
-          # 每次都先删干净历次旧注入块，再重写最新版（不再「看到标记就跳过」）
+          # 每次先删干净历次旧注入块，再重写最新版
           src = re.sub(r'<style id="AIMF_WEB_PATCH_V[0-9]+">.*?</style>\s*', '', src, flags=re.S)
-          src = re.sub(r'<style id="'+CSS_ID+r'">.*?</style>\s*', '', src, flags=re.S)
+          src = re.sub(r'<style id="aimf-fit-css-v[0-9]+">.*?</style>\s*', '', src, flags=re.S)
           src = re.sub(r'<div id="aimf-rotate[^"]*">.*?</div>\s*', '', src, flags=re.S)
-          src = re.sub(r'<div id="'+TIP_ID+r'">.*?</div>\s*', '', src, flags=re.S)
-          src = re.sub(r'<script id="'+JS_ID+r'">.*?</script>\s*', '', src, flags=re.S)
+          src = re.sub(r'<script id="aimf-fit-js-v[0-9]+">.*?</script>\s*', '', src, flags=re.S)
           src = re.sub(r'<script>\s*\(function\(\)\{\s*var lastW=0,lastH=0,tries=0;.*?</script>\s*', '', src, flags=re.S)
           src = re.sub(r'<script>\s*\(function\(\)\{\s*var tries=0;.*?</script>\s*', '', src, flags=re.S)
           src = src.replace('</head>', css+'</head>', 1) if '</head>' in src else css+src
           src = src.replace('</body>', body+'</body>', 1) if '</body>' in src else src+body
           io.open(p,'w',encoding='utf-8').write(src)
-          print("[aimusume-fit] injected: 16:9 centered, force-rewrite (inline)")
+          print("[aimusume-fit] injected v5: transform-scale, input coords preserved")
           PY
 
       - name: Configure Pages
