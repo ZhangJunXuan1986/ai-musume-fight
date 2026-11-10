@@ -1,6 +1,5 @@
 name: Deploy to GitHub Pages (pygbag)
 
-# 任何分支 push / 手动 Run workflow 都触发（不挑分支名）
 on:
   push:
     branches: ['**']
@@ -23,13 +22,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 容错：网页拖拽上传会把目录拍平，这里在构建机上临时补出结构
       - name: Normalize layout (tolerate flat upload)
         run: |
           python - <<'PY'
           import os, shutil, sys
           if not os.path.exists("game/main.py"):
-              print("检测到平铺结构，临时组装 game/ 与 tools/ ...")
               os.makedirs("game/assets", exist_ok=True)
               os.makedirs("tools", exist_ok=True)
               for src, dst in [
@@ -41,7 +38,6 @@ jobs:
               ]:
                   if os.path.exists(src) and not os.path.exists(dst):
                       shutil.copy2(src, dst)
-                      print("  %s -> %s" % (src, dst))
           if not os.path.exists("game/main.py"):
               sys.exit("ERROR: 仓库里找不到 main.py，无法构建。")
           PY
@@ -57,11 +53,10 @@ jobs:
       - name: Build WASM (build only, no server)
         run: python -m pygbag --build --width 1280 --height 720 game
 
-      # ★ v3.1 关键修复：canvas 的【布局宽高】恒等于内部像素 1280×720，
-      #   只用 transform:scale() 做视觉缩放。这样无论 pygbag 读 offsetX 还是
-      #   getBoundingClientRect 换算，鼠标/触摸坐标都落在 0..1280，右下角按钮点得到。
-      #   （v4 直接把 style.width 改小 → offsetX 最大只有缩放后的宽度 → 点不到。）
-      - name: Center canvas (transform scale, preserve input coords)
+      # v6：用「浏览器级缩放」统一坐标系。canvas 内部像素 = CSS 布局像素 =
+      # clientX 坐标系，都是 0..1280；不用 transform / 不改 style.width，
+      # 所以 SDL 无论读 clientX 还是做 rect 归一化，得到的都是同一个值。
+      - name: Fix canvas coords (viewport-level scale, v6)
         run: |
           python - <<'PY'
           import io, os, re, sys
@@ -70,88 +65,91 @@ jobs:
               sys.exit("ERROR: 找不到 " + p)
           src = io.open(p, encoding="utf-8", errors="replace").read()
 
-          CSS_ID, JS_ID, TIP_ID = "aimf-fit-css-v5", "aimf-fit-js-v5", "aimf-rotate-v5"
+          CSS_ID, HEAD_ID, BODY_ID, TIP_ID = (
+              "aimf-fit-css-v6", "aimf-vp-js", "aimf-fit-js-v6", "aimf-rotate-v6")
           css = """<style id="AIMF_CSS">
-          html,body{margin:0!important;padding:0!important;width:100%!important;height:100%!important;
-            overflow:hidden!important;overscroll-behavior:none!important;
-            background:#0b0d1a!important;zoom:1!important;transform:none!important;}
-          canvas{display:block!important;outline:none!important;
-            position:fixed!important;margin:0!important;zoom:1!important;
-            transform-origin:0 0!important;
+          html,body{margin:0!important;padding:0!important;background:#0b0d1a!important;
+            overflow:hidden!important;overscroll-behavior:none!important;}
+          canvas{display:block!important;margin:0 auto!important;outline:none!important;
             touch-action:none!important;}
           #AIMF_TIP{display:none;position:fixed;left:50%;top:calc(8px + env(safe-area-inset-top,0px));
             transform:translateX(-50%);z-index:9999;pointer-events:none;
-            background:rgba(11,13,28,.86);color:#ffd060;border:1px solid rgba(255,208,96,.45);
-            border-radius:22px;padding:8px 18px;max-width:92vw;white-space:nowrap;text-align:center;
-            font:600 14px/1.5 system-ui,-apple-system,sans-serif;}
+            background:rgba(11,13,28,.86);color:#ffd060;padding:8px 18px;border-radius:22px;
+            border:1px solid rgba(255,208,96,.45);font:600 14px/1.5 system-ui,sans-serif;}
           @media (orientation:portrait){#AIMF_TIP{display:block}}
           </style>
           """.replace("AIMF_CSS", CSS_ID).replace("AIMF_TIP", TIP_ID)
 
-          body = """<div id="AIMF_TIP2">请把手机横过来玩（竖屏也能继续加载）</div>
-          <script id="AIMF_JS">
+          head = """<script id="AIMF_HEAD">
           (function(){
-            var tries=0;
+            var vw = document.documentElement.clientWidth || window.innerWidth;
+            var vh = document.documentElement.clientHeight || window.innerHeight;
+            var s = Math.min(vw/1280, vh/720);
+            if(!isFinite(s)||s<=0) s = 1;
+            window.__aimfDevW = vw; window.__aimfDevH = vh; window.__aimfScale = s;
+            var mv = document.getElementById('aimf-vp') || document.querySelector('meta[name=viewport]');
+            if(mv) mv.setAttribute('content','width=1280, initial-scale='+s+
+              ', minimum-scale='+s+', maximum-scale='+s+', user-scalable=no, viewport-fit=cover');
+            console.log('[aimusume-fit] v6 viewport 1280 @ scale '+s.toFixed(4));
+          })();
+          </script>
+          """.replace("AIMF_HEAD", HEAD_ID)
+
+          body = """<div id="AIMF_TIP2">请把手机横过来玩</div>
+          <script id="AIMF_BODY">
+          (function(){
             function fit(){
-              var cs=document.querySelectorAll('canvas');
-              if(!cs.length) return;
-              var vw=window.innerWidth||document.documentElement.clientWidth;
-              var vh=(window.visualViewport&&window.visualViewport.height)||window.innerHeight;
-              if(!vw||!vh) return;
-              var w=0,h=0,L=0,T=0;
-              for(var i=0;i<cs.length;i++){
-                var c=cs[i];
-                if(c.style.display==='none'||c.width<2||c.height<2) continue;
-                var s=Math.min(vw/c.width,vh/c.height);
-                w=Math.round(c.width*s);h=Math.round(c.height*s);
-                L=Math.round((vw-w)/2);T=Math.round((vh-h)/2);
-                /* 布局尺寸 === 内部像素尺寸，视觉缩放只交给 transform */
-                c.style.setProperty('position','fixed','important');
-                c.style.setProperty('left',L+'px','important');
-                c.style.setProperty('top',T+'px','important');
-                c.style.setProperty('margin','0','important');
-                c.style.setProperty('width',c.width+'px','important');
-                c.style.setProperty('height',c.height+'px','important');
-                c.style.setProperty('max-width','none','important');
-                c.style.setProperty('max-height','none','important');
-                c.style.setProperty('zoom','1','important');
-                c.style.setProperty('transform-origin','0 0','important');
-                c.style.setProperty('transform','scale('+s+')','important');
-                c.style.setProperty('touch-action','none','important');
-                c.setAttribute('tabindex','0');
-              }
-              window.__aimfInputScale=1;
-              if(window.__aimfLast!==vw+'x'+vh){
-                window.__aimfLast=vw+'x'+vh;
-                console.log('[aimusume-fit] transform-scale '+cs[0].width+'x'+cs[0].height+' -> '+w+'x'+h+' @ '+L+','+T+'  (input coords preserved)');
-              }
+              var dpr = window.devicePixelRatio || 1;
+              var sw = (screen.width||1280)/dpr, sh = (screen.height||720)/dpr;
+              var land = (window.innerWidth >= window.innerHeight);
+              var vw = land ? Math.max(sw,sh) : Math.min(sw,sh);
+              var vh = land ? Math.min(sw,sh) : Math.max(sw,sh);
+              var s = Math.min(vw/1280, vh/720);
+              if(!isFinite(s)||s<=0) return;
+              window.__aimfScale = s;
+              var mv = document.getElementById('aimf-vp') || document.querySelector('meta[name=viewport]');
+              if(mv) mv.setAttribute('content','width=1280, initial-scale='+s+
+                ', minimum-scale='+s+', maximum-scale='+s+', user-scalable=no, viewport-fit=cover');
+              var c = document.querySelector('canvas');
+              if(c){c.style.setProperty('touch-action','none','important');c.setAttribute('tabindex','0');}
+              console.log('[aimusume-fit] v6 refit scale '+s.toFixed(4)+' (input coords = canvas coords)');
             }
-            fit();
             ['resize','orientationchange','pageshow','focus','load'].forEach(function(e){window.addEventListener(e,fit);});
-            if(window.visualViewport) window.visualViewport.addEventListener('resize',fit);
             document.addEventListener('visibilitychange',function(){if(!document.hidden){fit();try{document.querySelector('canvas').focus();}catch(e){}}});
-            var timer=setInterval(function(){
-              fit();var c=document.querySelector('canvas');
-              if(c&&c.width>0&&++tries>60) clearInterval(timer);
-            },250);
             document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:false});
             document.addEventListener('gesturestart',function(e){e.preventDefault();});
             document.addEventListener('pointerdown',function(){try{document.querySelector('canvas').focus();}catch(e){}},{passive:true});
+            fit();
           })();
           </script>
-          """.replace("AIMF_TIP2", TIP_ID).replace("AIMF_JS", JS_ID)
+          """.replace("AIMF_TIP2", TIP_ID).replace("AIMF_BODY", BODY_ID)
 
-          # 每次先删干净历次旧注入块，再重写最新版
+          # 1) 清掉历次注入过的所有块（v3~v5），避免叠层
           src = re.sub(r'<style id="AIMF_WEB_PATCH_V[0-9]+">.*?</style>\s*', '', src, flags=re.S)
           src = re.sub(r'<style id="aimf-fit-css-v[0-9]+">.*?</style>\s*', '', src, flags=re.S)
           src = re.sub(r'<div id="aimf-rotate[^"]*">.*?</div>\s*', '', src, flags=re.S)
           src = re.sub(r'<script id="aimf-fit-js-v[0-9]+">.*?</script>\s*', '', src, flags=re.S)
+          src = re.sub(r'<script id="aimf-vp-js">.*?</script>\s*', '', src, flags=re.S)
           src = re.sub(r'<script>\s*\(function\(\)\{\s*var lastW=0,lastH=0,tries=0;.*?</script>\s*', '', src, flags=re.S)
           src = re.sub(r'<script>\s*\(function\(\)\{\s*var tries=0;.*?</script>\s*', '', src, flags=re.S)
-          src = src.replace('</head>', css+'</head>', 1) if '</head>' in src else css+src
-          src = src.replace('</body>', body+'</body>', 1) if '</body>' in src else src+body
+          # 顺手清掉 canvas 上可能残留的内联缩放（旧模板 / 旧浏览器缓存），
+          # v6 完全不靠 CSS 缩放画布，留着会再次把坐标搞坏。
+          src = re.sub(r'(<canvas\b[^>]*?)\s+style="[^"]*"', r'\1', src, flags=re.I)
+
+          # 2) viewport meta 先临时设成 device-width，让 head 脚本量到真实设备视口
+          src, n = re.subn(r'<meta\s+name=["\']viewport["\'][^>]*>',
+              '<meta name="viewport" id="aimf-vp" content="width=device-width, initial-scale=1">',
+              src, count=1, flags=re.I)
+          if n == 0:
+              src = re.sub(r'(<head[^>]*>)',
+                  r'\1\n<meta name="viewport" id="aimf-vp" content="width=device-width, initial-scale=1">',
+                  src, count=1, flags=re.I)
+
+          # 3) head 里注入「测量 + 设 initial-scale」，body 里注入 resize 兜底
+          src = src.replace('</head>', css + head + '</head>', 1) if '</head>' in src else css + head + src
+          src = src.replace('</body>', body + '</body>', 1) if '</body>' in src else src + body
           io.open(p,'w',encoding='utf-8').write(src)
-          print("[aimusume-fit] injected v5: transform-scale, input coords preserved")
+          print("[aimusume-fit] injected v6: viewport-level scale, input coords = canvas coords")
           PY
 
       - name: Configure Pages
