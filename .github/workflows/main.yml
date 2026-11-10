@@ -53,10 +53,12 @@ jobs:
       - name: Build WASM (build only, no server)
         run: python -m pygbag --build --width 1280 --height 720 game
 
-      # v6：用「浏览器级缩放」统一坐标系。canvas 内部像素 = CSS 布局像素 =
-      # clientX 坐标系，都是 0..1280；不用 transform / 不改 style.width，
-      # 所以 SDL 无论读 clientX 还是做 rect 归一化，得到的都是同一个值。
-      - name: Fix canvas coords (viewport-level scale, v6)
+      # v7：撤销 v3~v6 对 canvas 的一切 CSS 干预。
+      # 键盘不走坐标换算所以一直能用；鼠标/触摸走 clientX -> 画布坐标，
+      # 改 canvas 的 style.width / transform / margin 会污染这套换算。
+      # 这里只改 viewport meta（浏览器级缩放，手机能看全），
+      # 【绝不】改 canvas 尺寸、绝不删它的 style、绝不加 canvas{...} 规则。
+      - name: Minimal page patch (leave canvas untouched)
         run: |
           python - <<'PY'
           import io, os, re, sys
@@ -65,91 +67,42 @@ jobs:
               sys.exit("ERROR: 找不到 " + p)
           src = io.open(p, encoding="utf-8", errors="replace").read()
 
-          CSS_ID, HEAD_ID, BODY_ID, TIP_ID = (
-              "aimf-fit-css-v6", "aimf-vp-js", "aimf-fit-js-v6", "aimf-rotate-v6")
-          css = """<style id="AIMF_CSS">
-          html,body{margin:0!important;padding:0!important;background:#0b0d1a!important;
-            overflow:hidden!important;overscroll-behavior:none!important;}
-          canvas{display:block!important;margin:0 auto!important;outline:none!important;
-            touch-action:none!important;}
-          #AIMF_TIP{display:none;position:fixed;left:50%;top:calc(8px + env(safe-area-inset-top,0px));
-            transform:translateX(-50%);z-index:9999;pointer-events:none;
-            background:rgba(11,13,28,.86);color:#ffd060;padding:8px 18px;border-radius:22px;
-            border:1px solid rgba(255,208,96,.45);font:600 14px/1.5 system-ui,sans-serif;}
-          @media (orientation:portrait){#AIMF_TIP{display:block}}
-          </style>
-          """.replace("AIMF_CSS", CSS_ID).replace("AIMF_TIP", TIP_ID)
+          # 1) 清掉历次注入过的所有补丁块，避免叠层
+          for pat in [
+              r'<style id="AIMF_WEB_PATCH_V[0-9]+">.*?</style>\s*',
+              r'<style id="aimf-fit-css-v[0-9]+">.*?</style>\s*',
+              r'<div id="aimf-rotate[^"]*">.*?</div>\s*',
+              r'<script id="aimf-fit-js-v[0-9]+">.*?</script>\s*',
+              r'<script id="aimf-vp-js">.*?</script>\s*',
+              r'<script>\s*\(function\(\)\{\s*var lastW=0,lastH=0,tries=0;.*?</script>\s*',
+              r'<script>\s*\(function\(\)\{\s*var tries=0;.*?</script>\s*',
+              r'<style>\s*#aimf-tip\{.*?</style>\s*',
+              r'<div id="aimf-tip">.*?</div>\s*',
+          ]:
+              src = re.sub(pat, '', src, flags=re.S)
 
-          head = """<script id="AIMF_HEAD">
-          (function(){
-            var vw = document.documentElement.clientWidth || window.innerWidth;
-            var vh = document.documentElement.clientHeight || window.innerHeight;
-            var s = Math.min(vw/1280, vh/720);
-            if(!isFinite(s)||s<=0) s = 1;
-            window.__aimfDevW = vw; window.__aimfDevH = vh; window.__aimfScale = s;
-            var mv = document.getElementById('aimf-vp') || document.querySelector('meta[name=viewport]');
-            if(mv) mv.setAttribute('content','width=1280, initial-scale='+s+
-              ', minimum-scale='+s+', maximum-scale='+s+', user-scalable=no, viewport-fit=cover');
-            console.log('[aimusume-fit] v6 viewport 1280 @ scale '+s.toFixed(4));
-          })();
-          </script>
-          """.replace("AIMF_HEAD", HEAD_ID)
-
-          body = """<div id="AIMF_TIP2">请把手机横过来玩</div>
-          <script id="AIMF_BODY">
-          (function(){
-            function fit(){
-              var dpr = window.devicePixelRatio || 1;
-              var sw = (screen.width||1280)/dpr, sh = (screen.height||720)/dpr;
-              var land = (window.innerWidth >= window.innerHeight);
-              var vw = land ? Math.max(sw,sh) : Math.min(sw,sh);
-              var vh = land ? Math.min(sw,sh) : Math.max(sw,sh);
-              var s = Math.min(vw/1280, vh/720);
-              if(!isFinite(s)||s<=0) return;
-              window.__aimfScale = s;
-              var mv = document.getElementById('aimf-vp') || document.querySelector('meta[name=viewport]');
-              if(mv) mv.setAttribute('content','width=1280, initial-scale='+s+
-                ', minimum-scale='+s+', maximum-scale='+s+', user-scalable=no, viewport-fit=cover');
-              var c = document.querySelector('canvas');
-              if(c){c.style.setProperty('touch-action','none','important');c.setAttribute('tabindex','0');}
-              console.log('[aimusume-fit] v6 refit scale '+s.toFixed(4)+' (input coords = canvas coords)');
-            }
-            ['resize','orientationchange','pageshow','focus','load'].forEach(function(e){window.addEventListener(e,fit);});
-            document.addEventListener('visibilitychange',function(){if(!document.hidden){fit();try{document.querySelector('canvas').focus();}catch(e){}}});
-            document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:false});
-            document.addEventListener('gesturestart',function(e){e.preventDefault();});
-            document.addEventListener('pointerdown',function(){try{document.querySelector('canvas').focus();}catch(e){}},{passive:true});
-            fit();
-          })();
-          </script>
-          """.replace("AIMF_TIP2", TIP_ID).replace("AIMF_BODY", BODY_ID)
-
-          # 1) 清掉历次注入过的所有块（v3~v5），避免叠层
-          src = re.sub(r'<style id="AIMF_WEB_PATCH_V[0-9]+">.*?</style>\s*', '', src, flags=re.S)
-          src = re.sub(r'<style id="aimf-fit-css-v[0-9]+">.*?</style>\s*', '', src, flags=re.S)
-          src = re.sub(r'<div id="aimf-rotate[^"]*">.*?</div>\s*', '', src, flags=re.S)
-          src = re.sub(r'<script id="aimf-fit-js-v[0-9]+">.*?</script>\s*', '', src, flags=re.S)
-          src = re.sub(r'<script id="aimf-vp-js">.*?</script>\s*', '', src, flags=re.S)
-          src = re.sub(r'<script>\s*\(function\(\)\{\s*var lastW=0,lastH=0,tries=0;.*?</script>\s*', '', src, flags=re.S)
-          src = re.sub(r'<script>\s*\(function\(\)\{\s*var tries=0;.*?</script>\s*', '', src, flags=re.S)
-          # 顺手清掉 canvas 上可能残留的内联缩放（旧模板 / 旧浏览器缓存），
-          # v6 完全不靠 CSS 缩放画布，留着会再次把坐标搞坏。
-          src = re.sub(r'(<canvas\b[^>]*?)\s+style="[^"]*"', r'\1', src, flags=re.I)
-
-          # 2) viewport meta 先临时设成 device-width，让 head 脚本量到真实设备视口
+          # 2) 只替换 viewport：布局视口 = 1280，浏览器整体缩放页面。
+          #    canvas 元素本身保持 pygbag 原样，clientX 与画布坐标同处 1280 系。
           src, n = re.subn(r'<meta\s+name=["\']viewport["\'][^>]*>',
-              '<meta name="viewport" id="aimf-vp" content="width=device-width, initial-scale=1">',
+              '<meta name="viewport" content="width=1280, user-scalable=no, viewport-fit=cover">',
               src, count=1, flags=re.I)
           if n == 0:
               src = re.sub(r'(<head[^>]*>)',
-                  r'\1\n<meta name="viewport" id="aimf-vp" content="width=device-width, initial-scale=1">',
+                  r'\1\n<meta name="viewport" content="width=1280, user-scalable=no, viewport-fit=cover">',
                   src, count=1, flags=re.I)
 
-          # 3) head 里注入「测量 + 设 initial-scale」，body 里注入 resize 兜底
-          src = src.replace('</head>', css + head + '</head>', 1) if '</head>' in src else css + head + src
-          src = src.replace('</body>', body + '</body>', 1) if '</body>' in src else src + body
+          # 3) 竖屏提示：小胶囊、pointer-events:none，不覆盖 canvas、不吃点击
+          tip = """<style>
+          #aimf-tip{display:none;position:fixed;left:50%;top:8px;transform:translateX(-50%);
+            z-index:9;pointer-events:none;background:rgba(11,13,28,.85);color:#ffd060;
+            padding:8px 18px;border-radius:22px;font:600 14px/1.4 system-ui,sans-serif;}
+          @media (orientation:portrait){#aimf-tip{display:block}}
+          </style>
+          <div id="aimf-tip">请把手机横过来玩</div>
+          """
+          src = src.replace('</body>', tip + '</body>', 1) if '</body>' in src else src + tip
           io.open(p,'w',encoding='utf-8').write(src)
-          print("[aimusume-fit] injected v6: viewport-level scale, input coords = canvas coords")
+          print("[aimusume-fit] v7: canvas untouched, viewport-only scaling")
           PY
 
       - name: Configure Pages
